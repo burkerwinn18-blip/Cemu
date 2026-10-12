@@ -195,8 +195,8 @@ namespace botwm
 			return;
 		const uint8* base = memory_getPointerFromVirtualOffset(mmuRange_MEM2.getBase());
 		const uint8* end = base + mmuRange_MEM2.getSize();
-		static const char kSuffix[] = "_animationthing"; // includes the terminating NUL in the search
-		std::boyer_moore_horspool_searcher searcher(kSuffix, kSuffix + sizeof(kSuffix));
+		static const uint8 kSuffix[] = "_animationthing"; // includes the terminating NUL in the search
+		std::boyer_moore_horspool_searcher searcher(std::begin(kSuffix), std::end(kSuffix));
 		std::vector<std::pair<int, MPTR>> found;
 		for (const uint8* it = base;;)
 		{
