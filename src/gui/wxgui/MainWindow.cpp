@@ -60,6 +60,8 @@
 //Cafe libs
 #include "Cafe/OS/libs/nfc/nfc.h"
 #include "Cafe/OS/libs/swkbd/swkbd.h"
+#include "Cafe/OS/libs/botwm/botwm.h"
+#include <wx/textdlg.h>
 
 #include "Cafe/HW/Latte/Renderer/Renderer.h" // For renderer API checks
 
@@ -128,6 +130,10 @@ enum
 	MAINFRAME_MENU_ID_NFC_TOUCH_NFC_FILE = 21000,
 	MAINFRAME_MENU_ID_NFC_RECENT_0,
 	MAINFRAME_MENU_ID_NFC_RECENT_LAST = MAINFRAME_MENU_ID_NFC_RECENT_0 + 15,
+	// multiplayer (BotW Multiplayer)
+	MAINFRAME_MENU_ID_MULTIPLAYER_CONNECT = 21050,
+	MAINFRAME_MENU_ID_MULTIPLAYER_DISCONNECT,
+	MAINFRAME_MENU_ID_MULTIPLAYER_STATUS,
 	// debug
 	MAINFRAME_MENU_ID_DEBUG_RENDER_UPSIDE_DOWN = 21100,
 	MAINFRAME_MENU_ID_DEBUG_VIEW_LOGGING_WINDOW,
@@ -211,6 +217,10 @@ EVT_MENU(MAINFRAME_MENU_ID_TIMER_SPEED_0125X, MainWindow::OnDebugSetting)
 // nfc menu
 EVT_MENU(MAINFRAME_MENU_ID_NFC_TOUCH_NFC_FILE, MainWindow::OnNFCMenu)
 EVT_MENU_RANGE(MAINFRAME_MENU_ID_NFC_RECENT_0 + 0, MAINFRAME_MENU_ID_NFC_RECENT_LAST, MainWindow::OnNFCMenu)
+// multiplayer menu
+EVT_MENU(MAINFRAME_MENU_ID_MULTIPLAYER_CONNECT, MainWindow::OnMultiplayerMenu)
+EVT_MENU(MAINFRAME_MENU_ID_MULTIPLAYER_DISCONNECT, MainWindow::OnMultiplayerMenu)
+EVT_MENU(MAINFRAME_MENU_ID_MULTIPLAYER_STATUS, MainWindow::OnMultiplayerMenu)
 // debug -> logging menu
 EVT_MENU_RANGE(MAINFRAME_MENU_ID_DEBUG_LOGGING0 + 0, MAINFRAME_MENU_ID_DEBUG_LOGGING0 + 98, MainWindow::OnDebugLoggingToggleFlagGeneric)
 EVT_MENU(MAINFRAME_MENU_ID_DEBUG_ADVANCED_PPC_INFO, MainWindow::OnPPCInfoToggle)
@@ -735,6 +745,34 @@ void MainWindow::OnInstallUpdate(wxCommandEvent& event)
 				return;
 			}
 		}
+	}
+}
+
+void MainWindow::OnMultiplayerMenu(wxCommandEvent& event)
+{
+	if (event.GetId() == MAINFRAME_MENU_ID_MULTIPLAYER_CONNECT)
+	{
+		std::string address, name, password;
+		botwm::GetSavedServer(address, name, password);
+		wxTextEntryDialog addressDialog(this, _("Server address (for example 192.168.1.20:5050)"), _("Connect to BotW Multiplayer server"), wxString::FromUTF8(address));
+		if (addressDialog.ShowModal() != wxID_OK)
+			return;
+		wxTextEntryDialog nameDialog(this, _("Your player name"), _("Connect to BotW Multiplayer server"), wxString::FromUTF8(name));
+		if (nameDialog.ShowModal() != wxID_OK)
+			return;
+		wxPasswordEntryDialog passwordDialog(this, _("Server password (leave empty if there is none)"), _("Connect to BotW Multiplayer server"), wxString::FromUTF8(password));
+		if (passwordDialog.ShowModal() != wxID_OK)
+			return;
+		if (!botwm::Connect(addressDialog.GetValue().Trim().Trim(false).utf8_string(), nameDialog.GetValue().Trim().Trim(false).utf8_string(), passwordDialog.GetValue().utf8_string()))
+			wxMessageBox(_("That server address doesn't look right. Use host:port, for example 192.168.1.20:5050."), _("Multiplayer"), wxOK | wxICON_WARNING, this);
+	}
+	else if (event.GetId() == MAINFRAME_MENU_ID_MULTIPLAYER_DISCONNECT)
+	{
+		botwm::Disconnect();
+	}
+	else if (event.GetId() == MAINFRAME_MENU_ID_MULTIPLAYER_STATUS)
+	{
+		wxMessageBox(wxString::FromUTF8(botwm::GetStatusText()), _("Multiplayer"), wxOK | wxICON_INFORMATION, this);
 	}
 }
 
@@ -2300,6 +2338,12 @@ void MainWindow::RecreateMenu()
 	m_nfcMenu = nfcMenu;
 	nfcMenu->Append(MAINFRAME_MENU_ID_NFC_TOUCH_NFC_FILE, _("&Scan NFC tag/amiibo from file"))->Enable(false);
 	m_menuBar->Append(nfcMenu, _("&NFC"));
+	// multiplayer menu (BotW Multiplayer)
+	wxMenu* multiplayerMenu = new wxMenu();
+	multiplayerMenu->Append(MAINFRAME_MENU_ID_MULTIPLAYER_CONNECT, _("&Connect to server..."));
+	multiplayerMenu->Append(MAINFRAME_MENU_ID_MULTIPLAYER_DISCONNECT, _("&Disconnect"));
+	multiplayerMenu->Append(MAINFRAME_MENU_ID_MULTIPLAYER_STATUS, _("Connection &status"));
+	m_menuBar->Append(multiplayerMenu, _("&Multiplayer"));
 	m_nfcMenuSeparator0 = nullptr;
 	// debug->logging submenu
 	wxMenu* debugLoggingMenu = new wxMenu();

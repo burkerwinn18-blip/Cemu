@@ -13,4 +13,13 @@ namespace botwm
 	COSModule* GetModuleActorInterceptor();
 	COSModule* GetModuleRemoteBombAIInterceptor();
 	COSModule* GetModuleTimeMgrInterceptor();
+
+	// Connection to a BotW Multiplayer dedicated server. address is "host" or "host:port".
+	// Returns false if the address can't be parsed. The connection runs in the background and
+	// reconnects on its own until Disconnect() is called.
+	bool Connect(const std::string& address, const std::string& name, const std::string& password);
+	void Disconnect();
+	std::string GetStatusText();
+	// last values passed to Connect(), saved in botwm.txt in the user data folder
+	void GetSavedServer(std::string& address, std::string& name, std::string& password);
 }
