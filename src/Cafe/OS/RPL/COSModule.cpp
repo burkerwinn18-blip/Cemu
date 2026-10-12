@@ -48,6 +48,7 @@
 #include "OS/libs/h264_avc/h264dec.h"
 #include "OS/libs/ntag/ntag.h"
 #include "OS/libs/nfc/nfc.h"
+#include "OS/libs/botwm/botwm.h"
 
 std::span<COSModule*> GetCOSModules()
 {
@@ -99,6 +100,11 @@ std::span<COSModule*> GetCOSModules()
 		H264::GetModule(),
 		ntag::GetModule(),
 		nfc::GetModule(),
+		botwm::GetModuleSpawnActors(),
+		botwm::GetModuleMultiplayer(),
+		botwm::GetModuleActorInterceptor(),
+		botwm::GetModuleRemoteBombAIInterceptor(),
+		botwm::GetModuleTimeMgrInterceptor(),
 	};
 	return s_cosModules;
 }

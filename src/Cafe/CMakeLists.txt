@@ -439,6 +439,8 @@ add_library(CemuCafe
   OS/libs/nsyskbd/nsyskbd.h
   OS/libs/nsysnet/nsysnet.cpp
   OS/libs/nsysnet/nsysnet.h
+  OS/libs/botwm/botwm.cpp
+  OS/libs/botwm/botwm.h
   OS/libs/ntag/ntag.cpp
   OS/libs/ntag/ntag.h
   OS/libs/padscore/padscore.cpp
