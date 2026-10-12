@@ -222,7 +222,7 @@ namespace botwm
 		for (auto& [player, addr] : found)
 		{
 			auto& slots = s_animNames[player];
-			if (std::none_of(slots.begin(), slots.end(), [addr](const AnimNameSlot& sl) { return sl.addr == addr; }))
+			if (std::none_of(slots.begin(), slots.end(), [a = addr](const AnimNameSlot& sl) { return sl.addr == a; }))
 				slots.push_back({ addr, OriginalAnimName(player).size(), "" });
 		}
 		s_animScanWanted = false;
