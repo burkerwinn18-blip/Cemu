@@ -8,7 +8,7 @@ namespace botwm
 	static std::string ReadGuestString(MPTR addr, size_t maxLen = 100)
 	{
 		std::string s;
-		if (addr == MPTR_NULL)
+		if (addr == MPTR_NULL || !memory_isAddressRangeAccessible(addr, (uint32)maxLen))
 			return s;
 		const char* p = (const char*)memory_getPointerFromVirtualOffset(addr);
 		for (size_t i = 0; i < maxLen && p[i] != '\0'; i++)
@@ -47,18 +47,31 @@ namespace botwm
 		osLib_returnFromFunction(hCPU, 0);
 	}
 
+	// actor hooks fire constantly, so only the first few are logged in full and the rest are counted
+	static constexpr uint32 kActorLogLimit = 200;
+
 	// ukl_actorinterceptor.OnActorCreate: game registers as they were at actor creation, r3 = actor
 	static void ActorInterceptor_OnActorCreate(PPCInterpreter_t* hCPU)
 	{
+		static uint32 s_count = 0;
 		MPTR actor = hCPU->gpr[3];
-		cemuLog_log(LogType::Force, "[BotWM] OnActorCreate 0x{:08x} {}", actor, ReadGuestString(actor + 0x10));
+		s_count++;
+		if (s_count <= kActorLogLimit)
+			cemuLog_log(LogType::Force, "[BotWM] OnActorCreate 0x{:08x} {}", actor, ReadGuestString(actor + 0x10));
+		else if (s_count % 1000 == 0)
+			cemuLog_log(LogType::Force, "[BotWM] OnActorCreate called {} times", s_count);
 		hCPU->instructionPointer = hCPU->spr.LR;
 	}
 
 	static void ActorInterceptor_OnActorDeleteLater(PPCInterpreter_t* hCPU)
 	{
+		static uint32 s_count = 0;
 		MPTR actor = hCPU->gpr[3];
-		cemuLog_log(LogType::Force, "[BotWM] OnActorDeleteLater 0x{:08x} {}", actor, ReadGuestString(actor + 0x10));
+		s_count++;
+		if (s_count <= kActorLogLimit)
+			cemuLog_log(LogType::Force, "[BotWM] OnActorDeleteLater 0x{:08x} {}", actor, ReadGuestString(actor + 0x10));
+		else if (s_count % 1000 == 0)
+			cemuLog_log(LogType::Force, "[BotWM] OnActorDeleteLater called {} times", s_count);
 		hCPU->instructionPointer = hCPU->spr.LR;
 	}
 
