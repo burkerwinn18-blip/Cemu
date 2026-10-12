@@ -1,5 +1,6 @@
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/HW/Espresso/PPCState.h"
+#include "Cafe/HW/MMU/MMU.h"
 #include "config/ActiveSettings.h"
 #include "Common/socket.h"
 #include "util/helpers/helpers.h"
@@ -10,6 +11,7 @@
 #endif
 
 #include <fstream>
+#include <functional>
 
 namespace botwm
 {
@@ -53,6 +55,7 @@ namespace botwm
 	{
 		Vec3 position;
 		Quat rotation[4];
+		uint32 animation = 0; // hash of the animation Link is playing
 	};
 
 	// An actor's Havok motion state, found through the same pointer chain the original mod used.
@@ -109,6 +112,8 @@ namespace botwm
 		pose.rotation[1] = ReadQuat(ms + 0x10);
 		pose.rotation[2] = ReadQuat(ms + 0x00);
 		pose.rotation[3] = ReadQuat(ms + 0x60);
+		// the original mod read Link's current animation hash from the actor itself
+		pose.animation = IsAccessible(actor + 0x540, 4) ? memory_readU32(actor + 0x540) : 0;
 		return true;
 	}
 
@@ -141,6 +146,7 @@ namespace botwm
 		PlayerPose pose;
 		MPTR actor = MPTR_NULL; // our "JugadorN" puppet, once spawned
 		uint64 spawnRequestFrame = 0; // 0 = no request outstanding
+		uint32 shownAnimation = 0; // animation last written for the puppet
 	};
 
 	struct SpawnRequest
@@ -159,6 +165,99 @@ namespace botwm
 	static bool s_interceptArmed = false;
 	static uint64 s_frame = 0;
 
+	/* ---------------------------------------------------------------------------------------------
+	 * Puppet animations
+	 *
+	 * The mod's MultiplayerEvent flow has every puppet run Demo_PlayASForDemo with the AS name
+	 * "JugadorN_animationthing". That name is a string in the loaded event flow, so the original mod
+	 * overwrote it in memory with "Anim_<hash>" (hash in decimal), and the Jugador actors' AS list
+	 * has an "Anim_<hash>" entry for each of Link's animations. We do the same.
+	 * ------------------------------------------------------------------------------------------- */
+
+	struct AnimNameSlot
+	{
+		MPTR addr;
+		size_t capacity; // length of the original string, we never write past it
+		std::string written; // what we last wrote there ("" = still the original)
+	};
+	static std::vector<AnimNameSlot> s_animNames[kMaxPlayers];
+	static bool s_animScanWanted = false;
+
+	static std::string OriginalAnimName(int playerNumber)
+	{
+		return fmt::format("Jugador{}_animationthing", playerNumber + 1);
+	}
+
+	// Find every "JugadorN_animationthing" string in the game heap. Runs on the network thread.
+	static void ScanAnimNames()
+	{
+		if (!mmuRange_MEM2.isMapped())
+			return;
+		const uint8* base = memory_getPointerFromVirtualOffset(mmuRange_MEM2.getBase());
+		const uint8* end = base + mmuRange_MEM2.getSize();
+		static const char kSuffix[] = "_animationthing"; // includes the terminating NUL in the search
+		std::boyer_moore_horspool_searcher searcher(kSuffix, kSuffix + sizeof(kSuffix));
+		std::vector<std::pair<int, MPTR>> found;
+		for (const uint8* it = base;;)
+		{
+			it = std::search(it, end, searcher);
+			if (it == end)
+				break;
+			// walk back over the player number to "Jugador"
+			const uint8* digits = it;
+			while (digits > base && digits[-1] >= '0' && digits[-1] <= '9' && it - digits < 2)
+				digits--;
+			if (digits != it && digits - base >= 7 && memcmp(digits - 7, "Jugador", 7) == 0)
+			{
+				int n = 0;
+				for (const uint8* d = digits; d < it; d++)
+					n = n * 10 + (*d - '0');
+				if (n >= 1 && n <= kMaxPlayers)
+					found.emplace_back(n - 1, mmuRange_MEM2.getBase() + (MPTR)(digits - 7 - base));
+			}
+			it += sizeof(kSuffix);
+		}
+
+		std::unique_lock _l(s_stateMutex);
+		for (auto& [player, addr] : found)
+		{
+			auto& slots = s_animNames[player];
+			if (std::none_of(slots.begin(), slots.end(), [addr](const AnimNameSlot& sl) { return sl.addr == addr; }))
+				slots.push_back({ addr, OriginalAnimName(player).size(), "" });
+		}
+		s_animScanWanted = false;
+		static size_t s_lastFoundCount = SIZE_MAX;
+		if (found.size() != s_lastFoundCount)
+			cemuLog_log(LogType::Force, "[BotWM] Found {} puppet animation names", found.size());
+		s_lastFoundCount = found.size();
+	}
+
+	// Point puppet N's animation name at "Anim_<hash>". Called on the game thread with s_stateMutex held.
+	static void SetPuppetAnimation(int playerNumber, uint32 animation)
+	{
+		std::string name = fmt::format("Anim_{}", animation);
+		std::string original = OriginalAnimName(playerNumber);
+		auto& slots = s_animNames[playerNumber];
+		for (auto it = slots.begin(); it != slots.end();)
+		{
+			// drop strings that were unloaded or reused since we found them
+			std::string current = IsAccessible(it->addr, (uint32)it->capacity + 1) ? ReadGuestString(it->addr, it->capacity + 1) : "";
+			bool ours = current == original || (!it->written.empty() && current == it->written);
+			if (!ours || name.size() > it->capacity)
+			{
+				it = slots.erase(it);
+				continue;
+			}
+			uint8* p = memory_getPointerFromVirtualOffset(it->addr);
+			memset(p, 0, it->capacity);
+			memcpy(p, name.data(), name.size());
+			it->written = name;
+			++it;
+		}
+		if (slots.empty())
+			s_animScanWanted = true;
+	}
+
 	static void ResetGameState()
 	{
 		std::unique_lock _l(s_stateMutex);
@@ -168,7 +267,11 @@ namespace botwm
 		{
 			rp.actor = MPTR_NULL;
 			rp.spawnRequestFrame = 0;
+			rp.shownAnimation = 0;
 		}
+		for (auto& slots : s_animNames)
+			slots.clear();
+		s_animScanWanted = false;
 		s_spawnQueue.clear();
 		s_interceptArmed = false;
 	}
@@ -269,7 +372,17 @@ namespace botwm
 
 		// our own Link
 		if (s_linkActor != MPTR_NULL)
+		{
+			uint32 previousAnimation = s_localPose.animation;
 			s_localPoseValid = ReadPose(s_linkActor, s_localPose);
+			// log the first few animation changes so a test log shows the hashes are sensible
+			static int s_animLogCount = 0;
+			if (s_localPoseValid && s_localPose.animation != previousAnimation && s_animLogCount < 20)
+			{
+				s_animLogCount++;
+				cemuLog_log(LogType::Force, "[BotWM] Link animation Anim_{}", s_localPose.animation);
+			}
+		}
 
 		// move the puppets of nearby players and queue spawns for missing ones
 		for (int i = 0; i < kMaxPlayers; i++)
@@ -280,6 +393,12 @@ namespace botwm
 			if (rp.actor != MPTR_NULL)
 			{
 				WritePose(rp.actor, rp.pose);
+				if (rp.pose.animation != 0 && (rp.pose.animation != rp.shownAnimation || s_animNames[i].empty()))
+				{
+					SetPuppetAnimation(i, rp.pose.animation);
+					if (!s_animNames[i].empty())
+						rp.shownAnimation = rp.pose.animation;
+				}
 				continue;
 			}
 			// give a request about 10 seconds to show up before trying again
@@ -349,6 +468,7 @@ namespace botwm
 			std::unique_lock _l(s_stateMutex);
 			s_remote[puppet].actor = actor;
 			s_remote[puppet].spawnRequestFrame = 0;
+			s_remote[puppet].shownAnimation = 0;
 			cemuLog_log(LogType::Force, "[BotWM] Player {} appeared as {} (0x{:08x})", puppet + 1, name, actor);
 		}
 	}
@@ -693,7 +813,7 @@ namespace botwm
 		w.V3(pose.position);
 		for (auto& q : pose.rotation)
 			w.Q(q);
-		w.I32(0); // animation
+		w.I32((sint32)pose.animation);
 		w.I32(0); // health
 		w.F32(0.0f); // attack up
 		w.Bool(false); // weapon equipped
@@ -736,7 +856,8 @@ namespace botwm
 			pose.position = r.V3();
 			for (auto& q : pose.rotation)
 				q = r.Q();
-			r.Skip(4 + 4 + 4 + 1); // animation, health, attack up, weapon equipped
+			pose.animation = (uint32)r.I32();
+			r.Skip(4 + 4 + 1); // health, attack up, weapon equipped
 			r.Skip(1 + 6 * 2); // equipment
 			r.Skip(2); // location
 			r.Skip(4 * 12); // bombs
@@ -820,6 +941,7 @@ namespace botwm
 			SetStatus(fmt::format("Connected as player {}", playerNumber + 1));
 
 			bool updateErrorLogged = false;
+			auto lastAnimScan = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 			while (!s_netStop)
 			{
 				auto frameStart = std::chrono::steady_clock::now();
@@ -836,6 +958,17 @@ namespace botwm
 				{
 					cemuLog_log(LogType::Force, "[BotWM] Could not read a server update ({} bytes)", length);
 					updateErrorLogged = true;
+				}
+				// look for the puppets' animation names when a puppet needs them, at most every 3 seconds
+				bool scan;
+				{
+					std::unique_lock _l(s_stateMutex);
+					scan = s_animScanWanted;
+				}
+				if (scan && frameStart - lastAnimScan > std::chrono::seconds(3))
+				{
+					lastAnimScan = frameStart;
+					ScanAnimNames();
 				}
 				std::this_thread::sleep_until(frameStart + std::chrono::milliseconds(33));
 			}
