@@ -12,7 +12,6 @@
 
 #include <fstream>
 #include <functional>
-#include <unordered_set>
 #include <zlib.h>
 
 namespace botwm
@@ -119,13 +118,42 @@ namespace botwm
 		return ReadGuestString(p, 64);
 	}
 
-	// The puppets' AS list names each animation "Anim_<crc32 of Link's animation name>"
-	static uint32 ReadAnimationHash(MPTR actor)
+	// The puppets' AS list is keyed on animation file names ("Anim_<crc32 of "Nml_Move_Run">"), while
+	// Link only exposes his state ("Move"). Pick the file that fits the state, using his speed
+	// (metres per second) to tell walking, running and sprinting apart. nullptr keeps the last one.
+	static const char* PickAnimationFile(std::string_view state, float speed)
 	{
-		std::string name = ReadAnimationName(actor);
-		if (name.empty())
-			return 0;
-		return (uint32)crc32(0, (const Bytef*)name.data(), (uInt)name.size());
+		auto has = [&](const char* part) { return state.find(part) != std::string_view::npos; };
+		if (state == "Fall")
+			return "Fall";
+		if (state == "Jump")
+			return speed < 2.0f ? "Nml_Wait_Jump" : "Nml_Move_Run_Jump_FootL";
+		if (state == "Land")
+			return speed < 2.0f ? "Nml_Wait_Land" : "Nml_Move_Run_Land_FootL";
+		if (has("Swim"))
+			return speed < 0.3f ? "Swim_Wait" : speed < 2.5f ? "Swim_Move_Slow_F" : "Swim_Move_Fast_F";
+		if (has("Climb"))
+			return speed < 0.2f ? "Climb_Wall_Wait_FootL" : "Climb_Wall_Move_U";
+		if (has("Squat") || has("Sneak"))
+			return speed < 0.3f ? "Squat_Wait_FootL" : "Squat_Move_Walk";
+		if (has("Float") || has("Glide") || has("Para"))
+			return "Float_Float";
+		if (has("Board"))
+			return "Shield_Board_Go2";
+		if (has("Horse") || has("Ride"))
+			return "Horse_Wait";
+		if (has("Attention"))
+			return speed < 0.3f ? "Nml_Lockon_Wait" : speed < 3.0f ? "Nml_Lockon_Walk_F" : "Nml_Lockon_Run_F";
+		if (has("Move"))
+			return speed < 0.3f ? "Nml_Wait" : speed < 3.0f ? "Nml_Move_Walk" : speed < 6.5f ? "Nml_Move_Run" : "Nml_Move_Dash";
+		if (has("Wait") || state == "Turn")
+			return "Nml_Wait";
+		return nullptr;
+	}
+
+	static uint32 AnimationHash(const char* file)
+	{
+		return (uint32)crc32(0, (const Bytef*)file, (uInt)strlen(file));
 	}
 
 	static bool ReadPose(MPTR actor, PlayerPose& pose)
@@ -138,7 +166,6 @@ namespace botwm
 		pose.rotation[1] = ReadQuat(ms + 0x10);
 		pose.rotation[2] = ReadQuat(ms + 0x00);
 		pose.rotation[3] = ReadQuat(ms + 0x60);
-		pose.animation = ReadAnimationHash(actor);
 		return true;
 	}
 
@@ -211,107 +238,6 @@ namespace botwm
 	static std::string OriginalAnimName(int playerNumber)
 	{
 		return fmt::format("Jugador{}_animationthing", playerNumber + 1);
-	}
-
-	/* ---------------------------------------------------------------------------------------------
-	 * Animation finder (diagnostic)
-	 *
-	 * Link+0x4 -> +0x388 -> +0xD4 names the AS state ("Wait", "Run"), but the puppets' AS list is keyed
-	 * on the animation file being played ("Nml_Wait", "Nml_Move_Run"). This walks the pointers reachable
-	 * from Link and logs every place holding one of those names, as text or as its CRC32.
-	 * ------------------------------------------------------------------------------------------- */
-
-	static const char* const kProbeAnimNames[] = {
-		"Nml_Wait", "Nml_Move_Run", "Nml_Move_Walk", "Nml_Move_Dash", "Nml_Wait_Jump", "Nml_Wait_Land",
-		"Nml_Move_Run_Jump_FootL", "Nml_Move_Run_Jump_FootR", "Nml_Lockon_Wait", "Float", "Fall",
-	};
-
-	struct AnimProbeState
-	{
-		std::unordered_map<uint32, const char*> hashToName;
-		std::unordered_set<std::string> logged;
-		std::vector<uint32> path;
-		std::unordered_set<MPTR> visited;
-		std::string root;
-		int linesLeft = 400;
-	};
-
-	static bool LooksLikeGuestPointer(uint32 v)
-	{
-		return v >= 0x02000000 && v < 0xE0000000 && (v & 3) == 0 && memory_isAddressRangeAccessible(v, 0x10);
-	}
-
-	static void ProbeLog(AnimProbeState& st, const char* kind, std::string_view name)
-	{
-		std::string p = st.root;
-		for (uint32 o : st.path)
-			p += fmt::format(">{:x}", o);
-		std::string key = p + kind + std::string(name);
-		if (st.linesLeft <= 0 || !st.logged.insert(key).second)
-			return;
-		st.linesLeft--;
-		cemuLog_log(LogType::Force, "[BotWM] AnimProbe {} {} at {}", kind, name, p);
-	}
-
-	static void ProbeNode(AnimProbeState& st, MPTR node, uint32 windowSize, int depth)
-	{
-		if (st.visited.size() > 100000 || !st.visited.insert(node).second || !memory_isAddressRangeAccessible(node, windowSize))
-			return;
-		for (uint32 off = 0; off < windowSize; off += 4)
-		{
-			uint32 v = memory_readU32(node + off);
-			st.path.push_back(off);
-			if (auto it = st.hashToName.find(v); it != st.hashToName.end())
-				ProbeLog(st, "hash", it->second);
-			else if (LooksLikeGuestPointer(v))
-			{
-				const char* str = (const char*)memory_getPointerFromVirtualOffset(v);
-				size_t len = strnlen(str, 0x10);
-				if (len < 0x10 && memcmp(str, "Nml_", 4) == 0)
-				{
-					len = strnlen(str, 64);
-					ProbeLog(st, "name", std::string_view(str, len));
-				}
-				else
-				{
-					for (const char* name : kProbeAnimNames)
-					{
-						size_t nlen = strlen(name);
-						if (memcmp(str, name, nlen) == 0 && str[nlen] == '\0')
-							ProbeLog(st, "name", name);
-					}
-				}
-				if (depth > 0)
-					ProbeNode(st, v, depth >= 2 ? 0x400 : 0x200, depth - 1);
-			}
-			st.path.pop_back();
-		}
-	}
-
-	static void ProbeFrom(AnimProbeState& st, const char* rootName, MPTR root, uint32 windowSize, int depth)
-	{
-		if (root == MPTR_NULL)
-			return;
-		st.visited.clear();
-		st.path.clear();
-		st.root = rootName;
-		ProbeNode(st, root, windowSize, depth);
-	}
-
-	// Runs on the network thread every few seconds while Link exists.
-	static void ProbeLinkAnimation(AnimProbeState& st, MPTR link)
-	{
-		if (st.hashToName.empty())
-			for (const char* name : kProbeAnimNames)
-				st.hashToName[(uint32)crc32(0, (const Bytef*)name, (uInt)strlen(name))] = name;
-		auto follow = [](MPTR p, uint32 off) -> MPTR {
-			return (p != MPTR_NULL && IsAccessible(p + off, 4)) ? memory_readU32(p + off) : MPTR_NULL;
-		};
-		MPTR link4 = follow(link, 0x4);
-		MPTR state = follow(link4, 0x388);
-		ProbeFrom(st, "Link", link, 0x1000, 2);
-		ProbeFrom(st, "Link>4", link4, 0x800, 3);
-		ProbeFrom(st, "Link>4>388", state, 0x400, 3);
 	}
 
 	// Find every "JugadorN_animationthing" string in the game heap. Runs on the network thread.
@@ -500,13 +426,44 @@ namespace botwm
 		if (s_linkActor != MPTR_NULL)
 		{
 			uint32 previousAnimation = s_localPose.animation;
+			Vec3 previousPosition = s_localPose.position;
+			bool hadPose = s_localPoseValid;
 			s_localPoseValid = ReadPose(s_linkActor, s_localPose);
-			// log the first few animation changes so a test log shows the hashes are sensible
-			static int s_animLogCount = 0;
-			if (s_localPoseValid && s_localPose.animation != previousAnimation && s_animLogCount < 20)
+			s_localPose.animation = previousAnimation;
+			if (s_localPoseValid)
 			{
-				s_animLogCount++;
-				cemuLog_log(LogType::Force, "[BotWM] Link animation {} (Anim_{})", ReadAnimationName(s_linkActor), s_localPose.animation);
+				// smoothed speed from how far Link moved since the last frame
+				static auto s_lastPoseTime = std::chrono::steady_clock::now();
+				static float s_speed = 0.0f;
+				auto now = std::chrono::steady_clock::now();
+				float dt = std::chrono::duration<float>(now - s_lastPoseTime).count();
+				s_lastPoseTime = now;
+				if (hadPose && dt > 0.001f && dt < 0.5f)
+				{
+					float dx = s_localPose.position.x - previousPosition.x;
+					float dy = s_localPose.position.y - previousPosition.y;
+					float dz = s_localPose.position.z - previousPosition.z;
+					float frameSpeed = std::sqrt(dx * dx + dy * dy + dz * dz) / dt;
+					s_speed += (std::min(frameSpeed, 30.0f) - s_speed) * 0.2f;
+				}
+				std::string state = ReadAnimationName(s_linkActor);
+				const char* file = state.empty() ? nullptr : PickAnimationFile(state, s_speed);
+				if (file)
+					s_localPose.animation = AnimationHash(file);
+				// log the first animation changes and unknown states so a test log shows what Link does
+				static int s_animLogCount = 0;
+				static std::vector<std::string> s_unknownStates;
+				if (file && s_localPose.animation != previousAnimation && s_animLogCount < 40)
+				{
+					s_animLogCount++;
+					cemuLog_log(LogType::Force, "[BotWM] Link {} -> {} ({:.1f} m/s)", state, file, s_speed);
+				}
+				if (!file && !state.empty() && s_unknownStates.size() < 40 &&
+					std::find(s_unknownStates.begin(), s_unknownStates.end(), state) == s_unknownStates.end())
+				{
+					s_unknownStates.push_back(state);
+					cemuLog_log(LogType::Force, "[BotWM] Link state {} has no animation yet", state);
+				}
 			}
 		}
 
@@ -1068,8 +1025,6 @@ namespace botwm
 
 			bool updateErrorLogged = false;
 			auto lastAnimScan = std::chrono::steady_clock::now() - std::chrono::seconds(10);
-			auto lastProbe = lastAnimScan;
-			static AnimProbeState probe;
 			while (!s_netStop)
 			{
 				auto frameStart = std::chrono::steady_clock::now();
@@ -1097,17 +1052,6 @@ namespace botwm
 				{
 					lastAnimScan = frameStart;
 					ScanAnimNames();
-				}
-				// diagnostic: look for where Link's animation file name lives, every 2 seconds
-				MPTR link;
-				{
-					std::unique_lock _l(s_stateMutex);
-					link = s_linkActor;
-				}
-				if (link != MPTR_NULL && frameStart - lastProbe > std::chrono::seconds(2))
-				{
-					lastProbe = frameStart;
-					ProbeLinkAnimation(probe, link);
 				}
 				std::this_thread::sleep_until(frameStart + std::chrono::milliseconds(33));
 			}
