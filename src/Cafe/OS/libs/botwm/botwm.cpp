@@ -168,6 +168,8 @@ namespace botwm
 			return speed < 0.3f ? "Nml_Lockon_Wait" : speed < 3.0f ? "Nml_Lockon_Walk_F" : "Nml_Lockon_Run_F";
 		if (has("Move"))
 			return speed < 0.3f ? "Nml_Wait" : speed < 3.0f ? "Nml_Move_Walk" : speed < 6.5f ? "Nml_Move_Run" : "Nml_Move_Dash";
+		if (state == "Brake")
+			return "Nml_Move_Run_Brake_FootL";
 		if (has("Wait") || state == "Turn")
 			return "Nml_Wait";
 		return nullptr;
@@ -454,29 +456,47 @@ namespace botwm
 			s_localPose.animation = previousAnimation;
 			if (s_localPoseValid)
 			{
-				// smoothed speed from how far Link moved since the last frame
-				static auto s_lastPoseTime = std::chrono::steady_clock::now();
-				static float s_speed = 0.0f;
+				// Link's speed, measured over at least 0.2 s (the hook can run several times per frame),
+				// then sorted into standing / walking / running / sprinting with some slack between each
+				// so the puppet doesn't flicker between two animations near a boundary
+				static auto s_speedStartTime = std::chrono::steady_clock::now();
+				static Vec3 s_speedStartPos;
+				static bool s_speedStarted = false;
+				static int s_gear = 0;
 				auto now = std::chrono::steady_clock::now();
-				float dt = std::chrono::duration<float>(now - s_lastPoseTime).count();
-				s_lastPoseTime = now;
-				if (hadPose && dt > 0.001f && dt < 0.5f)
+				float elapsed = std::chrono::duration<float>(now - s_speedStartTime).count();
+				if (!hadPose || !s_speedStarted || elapsed > 1.0f)
 				{
-					float dx = s_localPose.position.x - previousPosition.x;
-					float dy = s_localPose.position.y - previousPosition.y;
-					float dz = s_localPose.position.z - previousPosition.z;
-					float frameSpeed = std::sqrt(dx * dx + dy * dy + dz * dz) / dt;
-					s_speed += (std::min(frameSpeed, 30.0f) - s_speed) * 0.2f;
+					s_speedStartTime = now;
+					s_speedStartPos = s_localPose.position;
+					s_speedStarted = true;
 				}
+				else if (elapsed >= 0.2f)
+				{
+					float dx = s_localPose.position.x - s_speedStartPos.x;
+					float dz = s_localPose.position.z - s_speedStartPos.z;
+					float speed = std::sqrt(dx * dx + dz * dz) / elapsed;
+					static const float kUp[] = { 0.5f, 2.6f, 5.8f };
+					static const float kDown[] = { 0.25f, 1.8f, 4.8f };
+					while (s_gear < 3 && speed > kUp[s_gear])
+						s_gear++;
+					while (s_gear > 0 && speed < kDown[s_gear - 1])
+						s_gear--;
+					s_speedStartTime = now;
+					s_speedStartPos = s_localPose.position;
+				}
+				static const float kGearSpeed[] = { 0.0f, 1.5f, 4.0f, 7.0f };
+				float gearSpeed = kGearSpeed[s_gear];
 				// prefer the file Link is really playing; while moving, his slots blend walk/run/sprint,
 				// so pick one of those from his speed instead
 				std::string state = ReadAnimationName(s_linkActor);
 				std::string playing = ReadAnimationFile(s_linkActor);
 				const char* file = nullptr;
-				if (!playing.empty() && state.find("Move") == std::string::npos)
+				bool fromSlot = !playing.empty() && state.find("Move") == std::string::npos;
+				if (fromSlot)
 					file = playing.c_str();
 				else if (!state.empty())
-					file = PickAnimationFile(state, s_speed);
+					file = PickAnimationFile(state, gearSpeed);
 				if (file)
 					s_localPose.animation = AnimationHash(file);
 				// log the first animation changes and unknown states so a test log shows what Link does
@@ -485,7 +505,7 @@ namespace botwm
 				if (file && s_localPose.animation != previousAnimation && s_animLogCount < 40)
 				{
 					s_animLogCount++;
-					cemuLog_log(LogType::Force, "[BotWM] Link {} -> {} ({:.1f} m/s)", state, file, s_speed);
+					cemuLog_log(LogType::Force, "[BotWM] Link {} -> {}{}", state, file, fromSlot ? " (playing)" : "");
 				}
 				if (!file && !state.empty() && s_unknownStates.size() < 40 &&
 					std::find(s_unknownStates.begin(), s_unknownStates.end(), state) == s_unknownStates.end())
