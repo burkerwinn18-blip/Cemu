@@ -118,6 +118,28 @@ namespace botwm
 		return ReadGuestString(p, 64);
 	}
 
+	// Name of the animation file Link's main animation slot is playing ("Nml_Move_Run_Jump_FootR"),
+	// found with a test build: actor+0x4 -> +0x388 -> +0x0 -> +0x118 -> +0xB4, then a name pointer at
+	// +0x1CC (further blend slots follow every 0x14 bytes). Empty if it doesn't look like a name.
+	static std::string ReadAnimationFile(MPTR actor)
+	{
+		static const uint32 kChain[] = { 0x4, 0x388, 0x0, 0x118, 0xB4, 0x1CC };
+		MPTR p = actor;
+		for (uint32 offset : kChain)
+		{
+			if (p == MPTR_NULL || !IsAccessible(p + offset, 4))
+				return {};
+			p = memory_readU32(p + offset);
+		}
+		std::string name = ReadGuestString(p, 64);
+		if (name.size() < 3 || name.size() >= 63)
+			return {};
+		for (char c : name)
+			if (!isalnum((unsigned char)c) && c != '_')
+				return {};
+		return name;
+	}
+
 	// The puppets' AS list is keyed on animation file names ("Anim_<crc32 of "Nml_Move_Run">"), while
 	// Link only exposes his state ("Move"). Pick the file that fits the state, using his speed
 	// (metres per second) to tell walking, running and sprinting apart. nullptr keeps the last one.
@@ -446,8 +468,15 @@ namespace botwm
 					float frameSpeed = std::sqrt(dx * dx + dy * dy + dz * dz) / dt;
 					s_speed += (std::min(frameSpeed, 30.0f) - s_speed) * 0.2f;
 				}
+				// prefer the file Link is really playing; while moving, his slots blend walk/run/sprint,
+				// so pick one of those from his speed instead
 				std::string state = ReadAnimationName(s_linkActor);
-				const char* file = state.empty() ? nullptr : PickAnimationFile(state, s_speed);
+				std::string playing = ReadAnimationFile(s_linkActor);
+				const char* file = nullptr;
+				if (!playing.empty() && state.find("Move") == std::string::npos)
+					file = playing.c_str();
+				else if (!state.empty())
+					file = PickAnimationFile(state, s_speed);
 				if (file)
 					s_localPose.animation = AnimationHash(file);
 				// log the first animation changes and unknown states so a test log shows what Link does
