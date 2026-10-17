@@ -101,6 +101,7 @@ public:
 	void OnInstallUpdate(wxCommandEvent& event);
 	void OnFileExit(wxCommandEvent& event);
 	void OnNFCMenu(wxCommandEvent& event);
+	void OnMultiplayerMenu(wxCommandEvent& event);
 	void OnOptionsInput(wxCommandEvent& event);
 	void OnAccountSelect(wxCommandEvent& event);
 	void OnConsoleLanguage(wxCommandEvent& event);
