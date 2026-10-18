@@ -75,23 +75,11 @@ jobs:
     - name: Prepare artifact
       run: Rename-Item bin/Cemu_release.exe Cemu.exe
 
-    - name: Build NSIS Installer
-      shell: cmd
-      run: |
-        cd src\resource
-        makensis /DPRODUCT_VERSION=${{ inputs.next_version_major }}.${{ inputs.next_version_minor }} installer.nsi
-
     - name: Upload artifact
       uses: actions/upload-artifact@v6
       with:
         name: cemu-bin-windows-x64
         path: ./bin/Cemu.exe
-
-    - name: Upload NSIS Installer
-      uses: actions/upload-artifact@v6
-      with:
-        name: cemu-installer-windows-x64
-        path: ./src/resource/cemu-${{ inputs.next_version_major }}.${{ inputs.next_version_minor }}-windows-x64-installer.exe
 
   build-macos:
     runs-on: macos-15
