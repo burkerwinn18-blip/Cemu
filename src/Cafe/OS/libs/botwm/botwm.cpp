@@ -221,7 +221,7 @@ namespace botwm
 		bool close = false; // close enough that the server sent the full pose
 		PlayerPose pose;
 		MPTR actor = MPTR_NULL; // our "JugadorN" puppet, once spawned
-		uint64 spawnRequestFrame = 0; // 0 = no request outstanding
+		std::chrono::steady_clock::time_point nextSpawnTime{}; // don't ask for a puppet before this
 		uint32 shownAnimation = 0; // animation last written for the puppet
 	};
 
@@ -342,7 +342,7 @@ namespace botwm
 		for (auto& rp : s_remote)
 		{
 			rp.actor = MPTR_NULL;
-			rp.spawnRequestFrame = 0;
+			rp.nextSpawnTime = {};
 			rp.shownAnimation = 0;
 		}
 		for (auto& slots : s_animNames)
@@ -533,11 +533,13 @@ namespace botwm
 				}
 				continue;
 			}
-			// give a request about 10 seconds to show up before trying again
-			bool requestPending = rp.spawnRequestFrame != 0 && s_frame - rp.spawnRequestFrame < 600;
-			if (!requestPending && s_localPoseValid)
+			// give a request 10 seconds to show up before trying again. This is timed in seconds, not
+			// calls: the hook can run many times per frame (it did on a Mac), and counting calls made
+			// it ask for several puppets at once
+			auto now = std::chrono::steady_clock::now();
+			if (now >= rp.nextSpawnTime && s_localPoseValid)
 			{
-				rp.spawnRequestFrame = s_frame;
+				rp.nextSpawnTime = now + std::chrono::seconds(10);
 				s_spawnQueue.push_back({ PuppetName(i), rp.pose.position });
 			}
 		}
@@ -599,7 +601,6 @@ namespace botwm
 		{
 			std::unique_lock _l(s_stateMutex);
 			s_remote[puppet].actor = actor;
-			s_remote[puppet].spawnRequestFrame = 0;
 			s_remote[puppet].shownAnimation = 0;
 			cemuLog_log(LogType::Force, "[BotWM] Player {} appeared as {} (0x{:08x})", puppet + 1, name, actor);
 		}
@@ -618,7 +619,9 @@ namespace botwm
 			if (s_remote[i].actor == actor)
 			{
 				s_remote[i].actor = MPTR_NULL;
-				s_remote[i].spawnRequestFrame = 0;
+				// wait a moment before spawning a new one, so a puppet the game removes again and
+				// again doesn't turn into a constant respawn loop
+				s_remote[i].nextSpawnTime = std::chrono::steady_clock::now() + std::chrono::seconds(3);
 				cemuLog_log(LogType::Force, "[BotWM] Player {} puppet removed", i + 1);
 			}
 		}
