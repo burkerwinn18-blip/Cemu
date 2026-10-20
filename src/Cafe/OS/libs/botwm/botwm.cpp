@@ -223,6 +223,7 @@ namespace botwm
 		MPTR actor = MPTR_NULL; // our "JugadorN" puppet, once spawned
 		std::chrono::steady_clock::time_point nextSpawnTime{}; // don't ask for a puppet before this
 		uint32 shownAnimation = 0; // animation last written for the puppet
+		std::chrono::steady_clock::time_point appearedTime{}; // when the current puppet was created
 	};
 
 	struct SpawnRequest
@@ -239,6 +240,7 @@ namespace botwm
 	static int s_localPlayerNumber = -1;
 	static std::deque<SpawnRequest> s_spawnQueue;
 	static bool s_interceptArmed = false;
+	static bool s_templateWanted = false; // asked the patch for a fresh copy of the game's create arguments
 	static uint64 s_frame = 0;
 
 	/* ---------------------------------------------------------------------------------------------
@@ -334,6 +336,24 @@ namespace botwm
 			s_animScanWanted = true;
 	}
 
+	// Put puppet N's animation name back to "JugadorN_animationthing" before a new puppet is created,
+	// so every puppet starts the way the first one does
+	static void RestorePuppetAnimation(int playerNumber)
+	{
+		std::string original = OriginalAnimName(playerNumber);
+		for (auto& slot : s_animNames[playerNumber])
+		{
+			if (slot.written.empty() || !IsAccessible(slot.addr, (uint32)slot.capacity + 1))
+				continue;
+			if (ReadGuestString(slot.addr, slot.capacity + 1) != slot.written)
+				continue;
+			uint8* p = memory_getPointerFromVirtualOffset(slot.addr);
+			memset(p, 0, slot.capacity);
+			memcpy(p, original.data(), original.size());
+			slot.written.clear();
+		}
+	}
+
 	static void ResetGameState()
 	{
 		std::unique_lock _l(s_stateMutex);
@@ -350,6 +370,7 @@ namespace botwm
 		s_animScanWanted = false;
 		s_spawnQueue.clear();
 		s_interceptArmed = false;
+		s_templateWanted = false;
 	}
 
 	/* ---------------------------------------------------------------------------------------------
@@ -420,6 +441,8 @@ namespace botwm
 		memory_writeU8(startData + 0x00, 1);
 		cemuLog_log(LogType::Force, "[BotWM] Spawning {} at {:.1f} {:.1f} {:.1f}", req.name, req.position.x, req.position.y, req.position.z);
 	}
+
+	static int ParsePuppetName(const std::string& name);
 
 	static std::string PuppetName(int playerNumber)
 	{
@@ -537,21 +560,36 @@ namespace botwm
 			// calls: the hook can run many times per frame (it did on a Mac), and counting calls made
 			// it ask for several puppets at once
 			auto now = std::chrono::steady_clock::now();
-			if (now >= rp.nextSpawnTime && s_localPoseValid)
+			bool queued = std::any_of(s_spawnQueue.begin(), s_spawnQueue.end(), [n = PuppetName(i)](const SpawnRequest& r) { return r.name == n; });
+			if (now >= rp.nextSpawnTime && s_localPoseValid && !queued)
 			{
 				rp.nextSpawnTime = now + std::chrono::seconds(10);
 				s_spawnQueue.push_back({ PuppetName(i), rp.pose.position });
 			}
 		}
 
-		// one spawn per frame, once the patch has the template registers and has run the previous one
-		bool templateReady = ReadInterceptedReg(startData, 7) != MPTR_NULL;
+		// One spawn per frame. The game's create arguments we copy can point at memory the game
+		// reuses later (old copies made puppets vanish right away and once crashed the game), so
+		// before each spawn have the patch record a fresh set from the game's next own request.
 		bool patchIdle = memory_readU8(startData + 0x00) == 0;
-		if (!s_spawnQueue.empty() && templateReady && patchIdle)
+		if (!s_spawnQueue.empty() && patchIdle)
 		{
-			SpawnRequest req = s_spawnQueue.front();
-			s_spawnQueue.pop_front();
-			IssueSpawn(hCPU, startData, req);
+			if (!s_templateWanted)
+			{
+				memory_writeU32(startData + 0x0C + (7 - 3) * 4, MPTR_NULL);
+				memory_writeU8(startData + 0x01, 1);
+				s_templateWanted = true;
+			}
+			else if (memory_readU8(startData + 0x01) == 0 && ReadInterceptedReg(startData, 7) != MPTR_NULL)
+			{
+				SpawnRequest req = s_spawnQueue.front();
+				s_spawnQueue.pop_front();
+				s_templateWanted = false;
+				int player = ParsePuppetName(req.name);
+				if (player >= 0)
+					RestorePuppetAnimation(player);
+				IssueSpawn(hCPU, startData, req);
+			}
 		}
 	}
 
@@ -602,6 +640,7 @@ namespace botwm
 			std::unique_lock _l(s_stateMutex);
 			s_remote[puppet].actor = actor;
 			s_remote[puppet].shownAnimation = 0;
+			s_remote[puppet].appearedTime = std::chrono::steady_clock::now();
 			cemuLog_log(LogType::Force, "[BotWM] Player {} appeared as {} (0x{:08x})", puppet + 1, name, actor);
 		}
 	}
@@ -622,7 +661,17 @@ namespace botwm
 				// wait a moment before spawning a new one, so a puppet the game removes again and
 				// again doesn't turn into a constant respawn loop
 				s_remote[i].nextSpawnTime = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-				cemuLog_log(LogType::Force, "[BotWM] Player {} puppet removed", i + 1);
+				// how long it lived and how far from our Link it was, to tell why the game removed it
+				float alive = std::chrono::duration<float>(std::chrono::steady_clock::now() - s_remote[i].appearedTime).count();
+				float dist = -1.0f;
+				if (s_localPoseValid)
+				{
+					float dx = s_remote[i].pose.position.x - s_localPose.position.x;
+					float dy = s_remote[i].pose.position.y - s_localPose.position.y;
+					float dz = s_remote[i].pose.position.z - s_localPose.position.z;
+					dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+				}
+				cemuLog_log(LogType::Force, "[BotWM] Player {} puppet removed after {:.1f}s, {:.0f}m from Link", i + 1, alive, dist);
 			}
 		}
 	}
