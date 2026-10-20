@@ -586,9 +586,14 @@ namespace botwm
 				s_spawnQueue.pop_front();
 				s_templateWanted = false;
 				int player = ParsePuppetName(req.name);
-				if (player >= 0)
+				// waiting for the arguments can take a while: count the 10 seconds from now, and drop
+				// the request if the puppet showed up in the meantime (that made two puppets at once)
+				if (player >= 0 && s_remote[player].actor == MPTR_NULL)
+				{
+					s_remote[player].nextSpawnTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
 					RestorePuppetAnimation(player);
-				IssueSpawn(hCPU, startData, req);
+					IssueSpawn(hCPU, startData, req);
+				}
 			}
 		}
 	}
@@ -680,6 +685,30 @@ namespace botwm
 	{
 		MPTR actor = hCPU->gpr[3];
 		hCPU->instructionPointer = hCPU->spr.LR;
+		// For a puppet, log the delete reason (r4) and who asked for it, to find out why the game
+		// removes them. The patch and its helpers use 156 bytes of stack before calling us; the
+		// game's return address is saved 8 bytes below its stack pointer.
+		bool isPuppet = false;
+		{
+			std::unique_lock _l(s_stateMutex);
+			for (auto& rp : s_remote)
+				isPuppet |= actor != MPTR_NULL && rp.actor == actor;
+		}
+		if (isPuppet)
+		{
+			MPTR sp = hCPU->gpr[1] + 156;
+			std::string callers;
+			if (IsAccessible(sp - 8, 4))
+				callers = fmt::format("{:08x}", memory_readU32(sp - 8));
+			for (int i = 0; i < 6 && IsAccessible(sp, 4); i++)
+			{
+				sp = memory_readU32(sp);
+				if (!IsAccessible(sp, 8))
+					break;
+				callers += fmt::format(" {:08x}", memory_readU32(sp + 4));
+			}
+			cemuLog_log(LogType::Force, "[BotWM] Game deletes puppet 0x{:08x}: reason {} (r5 {:08x}), called from {}", actor, hCPU->gpr[4], hCPU->gpr[5], callers);
+		}
 		ForgetActor(actor);
 	}
 
