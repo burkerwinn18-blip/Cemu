@@ -239,6 +239,7 @@ namespace botwm
 	static RemotePlayer s_remote[kMaxPlayers];
 	static int s_localPlayerNumber = -1;
 	static std::deque<SpawnRequest> s_spawnQueue;
+	static constexpr auto kPuppetSettleTime = std::chrono::milliseconds(1500);
 	static bool s_interceptArmed = false;
 	static bool s_templateWanted = false; // asked the patch for a fresh copy of the game's create arguments
 	static uint64 s_frame = 0;
@@ -547,6 +548,11 @@ namespace botwm
 				continue;
 			if (rp.actor != MPTR_NULL)
 			{
+				// leave a new puppet alone while the game finishes creating it: moving it in its first
+				// moments made the game delete it again (it only survived when the other player
+				// happened to be standing still)
+				if (std::chrono::steady_clock::now() - rp.appearedTime < kPuppetSettleTime)
+					continue;
 				WritePose(rp.actor, rp.pose);
 				if (rp.pose.animation != 0 && (rp.pose.animation != rp.shownAnimation || s_animNames[i].empty()))
 				{
@@ -592,6 +598,7 @@ namespace botwm
 				{
 					s_remote[player].nextSpawnTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
 					RestorePuppetAnimation(player);
+					req.position = s_remote[player].pose.position; // where the player is now, not when queued
 					IssueSpawn(hCPU, startData, req);
 				}
 			}
