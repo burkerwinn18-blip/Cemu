@@ -224,6 +224,9 @@ namespace botwm
 		std::chrono::steady_clock::time_point nextSpawnTime{}; // don't ask for a puppet before this
 		uint32 shownAnimation = 0; // animation last written for the puppet
 		std::chrono::steady_clock::time_point appearedTime{}; // when the current puppet was created
+		std::string spawnHeap; // name of the heap the current puppet was created in
+		std::string requestedHeap; // same for the request still waiting to show up
+		bool heapNoted = false; // already checked whether this puppet lasted
 	};
 
 	struct SpawnRequest
@@ -242,6 +245,12 @@ namespace botwm
 	static constexpr auto kPuppetSettleTime = std::chrono::milliseconds(1500);
 	static bool s_interceptArmed = false;
 	static bool s_templateWanted = false; // asked the patch for a fresh copy of the game's create arguments
+	static std::chrono::steady_clock::time_point s_templateWaitStart{};
+	// The game deletes most puppets right after creating them, but a few last. Each one copies the heap
+	// of whatever the game created just before, so once a puppet lasts we wait for that heap again.
+	static std::string s_goodHeap;
+	static constexpr auto kHeapWaitTime = std::chrono::seconds(8);
+	static constexpr auto kPuppetLastedTime = std::chrono::seconds(3);
 	static uint64 s_frame = 0;
 
 	/* ---------------------------------------------------------------------------------------------
@@ -261,6 +270,24 @@ namespace botwm
 	};
 	static std::vector<AnimNameSlot> s_animNames[kMaxPlayers];
 	static bool s_animScanWanted = false;
+
+	// A sead heap keeps a pointer to its name near the start. Returns "" when none is found.
+	static std::string HeapName(MPTR heap)
+	{
+		if (!IsAccessible(heap, 0x40))
+			return "";
+		for (uint32 offset = 0; offset < 0x40; offset += 4)
+		{
+			MPTR p = memory_readU32(heap + offset);
+			if (!IsAccessible(p, 4))
+				continue;
+			std::string name = ReadGuestString(p, 48);
+			if (name.size() >= 3 && name.size() < 48 && IsAccessible(p + (MPTR)name.size(), 1) &&
+				memory_readU8(p + (MPTR)name.size()) == 0)
+				return name;
+		}
+		return "";
+	}
 
 	static std::string OriginalAnimName(int playerNumber)
 	{
@@ -440,7 +467,9 @@ namespace botwm
 		memory_writeU32(startData + 0x04, kRequestCreateActor);
 		memory_writeU8(startData + 0x01, 0);
 		memory_writeU8(startData + 0x00, 1);
-		cemuLog_log(LogType::Force, "[BotWM] Spawning {} at {:.1f} {:.1f} {:.1f}", req.name, req.position.x, req.position.y, req.position.z);
+		cemuLog_log(LogType::Force, "[BotWM] Spawning {} at {:.1f} {:.1f} {:.1f} (heap {} 0x{:08x}, template r8 {:08x} r9 {:08x} r10 {:08x})",
+			req.name, req.position.x, req.position.y, req.position.z, HeapName(hCPU->gpr[5]), hCPU->gpr[5],
+			ReadInterceptedReg(startData, 8), ReadInterceptedReg(startData, 9), ReadInterceptedReg(startData, 10));
 	}
 
 	static int ParsePuppetName(const std::string& name);
@@ -551,7 +580,17 @@ namespace botwm
 				// leave a new puppet alone while the game finishes creating it: moving it in its first
 				// moments made the game delete it again (it only survived when the other player
 				// happened to be standing still)
-				if (std::chrono::steady_clock::now() - rp.appearedTime < kPuppetSettleTime)
+				auto alive = std::chrono::steady_clock::now() - rp.appearedTime;
+				if (!rp.heapNoted && alive >= kPuppetLastedTime)
+				{
+					rp.heapNoted = true;
+					if (!rp.spawnHeap.empty() && rp.spawnHeap != s_goodHeap)
+					{
+						s_goodHeap = rp.spawnHeap;
+						cemuLog_log(LogType::Force, "[BotWM] Player {} puppet lasted, using heap {} from now on", i + 1, s_goodHeap);
+					}
+				}
+				if (alive < kPuppetSettleTime)
 					continue;
 				WritePose(rp.actor, rp.pose);
 				if (rp.pose.animation != 0 && (rp.pose.animation != rp.shownAnimation || s_animNames[i].empty()))
@@ -567,7 +606,8 @@ namespace botwm
 			// it ask for several puppets at once
 			auto now = std::chrono::steady_clock::now();
 			bool queued = std::any_of(s_spawnQueue.begin(), s_spawnQueue.end(), [n = PuppetName(i)](const SpawnRequest& r) { return r.name == n; });
-			if (now >= rp.nextSpawnTime && s_localPoseValid && !queued)
+			bool hasPosition = rp.pose.position.x != 0.0f || rp.pose.position.y != 0.0f || rp.pose.position.z != 0.0f;
+			if (now >= rp.nextSpawnTime && s_localPoseValid && !queued && hasPosition)
 			{
 				rp.nextSpawnTime = now + std::chrono::seconds(10);
 				s_spawnQueue.push_back({ PuppetName(i), rp.pose.position });
@@ -585,6 +625,15 @@ namespace botwm
 				memory_writeU32(startData + 0x0C + (7 - 3) * 4, MPTR_NULL);
 				memory_writeU8(startData + 0x01, 1);
 				s_templateWanted = true;
+				s_templateWaitStart = std::chrono::steady_clock::now();
+			}
+			else if (memory_readU8(startData + 0x01) == 0 && ReadInterceptedReg(startData, 7) != MPTR_NULL &&
+				!s_goodHeap.empty() && HeapName(ReadInterceptedReg(startData, 5)) != s_goodHeap &&
+				std::chrono::steady_clock::now() - s_templateWaitStart < kHeapWaitTime)
+			{
+				// not the heap that worked before: wait for the game's next request
+				memory_writeU32(startData + 0x0C + (7 - 3) * 4, MPTR_NULL);
+				memory_writeU8(startData + 0x01, 1);
 			}
 			else if (memory_readU8(startData + 0x01) == 0 && ReadInterceptedReg(startData, 7) != MPTR_NULL)
 			{
@@ -599,6 +648,7 @@ namespace botwm
 					s_remote[player].nextSpawnTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
 					RestorePuppetAnimation(player);
 					req.position = s_remote[player].pose.position; // where the player is now, not when queued
+					s_remote[player].requestedHeap = HeapName(ReadInterceptedReg(startData, 5));
 					IssueSpawn(hCPU, startData, req);
 				}
 			}
@@ -653,6 +703,8 @@ namespace botwm
 			s_remote[puppet].actor = actor;
 			s_remote[puppet].shownAnimation = 0;
 			s_remote[puppet].appearedTime = std::chrono::steady_clock::now();
+			s_remote[puppet].spawnHeap = s_remote[puppet].requestedHeap;
+			s_remote[puppet].heapNoted = false;
 			cemuLog_log(LogType::Force, "[BotWM] Player {} appeared as {} (0x{:08x})", puppet + 1, name, actor);
 		}
 	}
