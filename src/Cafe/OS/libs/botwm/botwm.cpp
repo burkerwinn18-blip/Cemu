@@ -242,14 +242,15 @@ namespace botwm
 	static RemotePlayer s_remote[kMaxPlayers];
 	static int s_localPlayerNumber = -1;
 	static std::deque<SpawnRequest> s_spawnQueue;
-	static constexpr auto kPuppetSettleTime = std::chrono::milliseconds(1500);
+	// no settle time: the game deletes most puppets within 0.2 s anyway, and leaving them alone didn't help
+	static constexpr auto kPuppetSettleTime = std::chrono::milliseconds(0);
 	static bool s_interceptArmed = false;
 	static bool s_templateWanted = false; // asked the patch for a fresh copy of the game's create arguments
 	static std::chrono::steady_clock::time_point s_templateWaitStart{};
 	// The game deletes most puppets right after creating them, but a few last. Each one copies the heap
 	// of whatever the game created just before, so once a puppet lasts we wait for that heap again.
 	static std::string s_goodHeap;
-	static constexpr auto kHeapWaitTime = std::chrono::seconds(8);
+	static constexpr auto kHeapWaitTime = std::chrono::seconds(1);
 	static constexpr auto kPuppetLastedTime = std::chrono::seconds(3);
 	static uint64 s_frame = 0;
 
@@ -722,9 +723,9 @@ namespace botwm
 			if (s_remote[i].actor == actor)
 			{
 				s_remote[i].actor = MPTR_NULL;
-				// wait a moment before spawning a new one, so a puppet the game removes again and
-				// again doesn't turn into a constant respawn loop
-				s_remote[i].nextSpawnTime = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+				// put a new one back right away: the game deletes most puppets moments after creating
+				// them, and respawning quickly (like the first build did) keeps the player visible
+				s_remote[i].nextSpawnTime = std::chrono::steady_clock::now();
 				// how long it lived and how far from our Link it was, to tell why the game removed it
 				float alive = std::chrono::duration<float>(std::chrono::steady_clock::now() - s_remote[i].appearedTime).count();
 				float dist = -1.0f;
