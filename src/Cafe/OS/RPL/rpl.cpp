@@ -2052,7 +2052,7 @@ uint32 RPLLoader_GetHandleByModuleName(const char* name)
 		if (dep->moduleName == moduleName)
 		{
 			cemu_assert_debug(dep->loadAttempted);
-			if (!dep->isCafeOSModule && !dep->rplLoaderContext)
+			if (!dep->isCafeOSModule && !dep->rplLoaderContext && !dep->rplHLEModule)
 				return RPL_INVALID_HANDLE; // module not found
 			return dep->coreinitHandle;
 		}
